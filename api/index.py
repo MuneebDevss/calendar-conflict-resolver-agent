@@ -10,8 +10,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
-# LangChain Imports
-from langchain_openai import ChatOpenAI
+# LangChain Imports (Gemini)
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.tools import tool
 from langchain_core.messages import HumanMessage, AIMessage
@@ -25,7 +25,7 @@ from pymongo import MongoClient
 # =============================================================================
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-MODEL_NAME = "gpt-4o"
+MODEL_NAME = "gemini-1.5-flash"
 
 # Prompt
 AGENT_SYSTEM_PROMPT = """You are an expert Executive Assistant and Calendar Conflict Resolver.
@@ -268,14 +268,14 @@ def resolve_conflict_reschedule(event_id: str, new_start_time: str) -> str:
 
 def build_agent():
     tools = [get_current_time_and_events, schedule_event, resolve_conflict_reschedule]
-    llm = ChatOpenAI(model=MODEL_NAME, temperature=0)
-    
+    llm = ChatGoogleGenerativeAI(model=MODEL_NAME, temperature=0)
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", AGENT_SYSTEM_PROMPT),
         MessagesPlaceholder(variable_name="messages"),
         MessagesPlaceholder(variable_name="agent_scratchpad"),
     ])
-    
+
     agent = create_tool_calling_agent(llm, tools, prompt)
     return AgentExecutor(agent=agent, tools=tools, verbose=False)
 
@@ -372,9 +372,9 @@ def chat():
         if not user_message:
             return jsonify({"error": "Message required"}), 400
 
-        # Check for OpenAI API key
-        if not os.environ.get('OPENAI_API_KEY'):
-            return jsonify({"error": "OPENAI_API_KEY not set"}), 500
+        # Check for Gemini API key
+        if not os.environ.get('GOOGLE_API_KEY'):
+            return jsonify({"error": "GOOGLE_API_KEY not set"}), 500
         
         # --- LOAD TOKEN FROM MONGODB ---
         creds = load_token_from_db()
