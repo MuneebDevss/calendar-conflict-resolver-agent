@@ -5,5 +5,3 @@ __pycache__
 .env
 .venv
 venv/
-credentials.json
-web_credientials.json
