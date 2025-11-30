@@ -14,8 +14,11 @@ from googleapiclient.discovery import build
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+# MongoDB Imports
+from pymongo import MongoClient
 
 # =============================================================================
 # CONFIGURATION
@@ -23,37 +26,109 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 MODEL_NAME = "gpt-4o"
-AGENT_SYSTEM_PROMPT = """You are an expert Executive Assistant and Calendar Conflict Resolver.\n\nResponsibilities:\n1. Manage the user's Google Calendar.\n2. Detect conflicts (overlapping events).\n3. Propose and execute solutions (rescheduling).\n\nGuidelines:\n- ALWAYS call `get_current_time_and_events` before proposing time slots or editing events.\n- When resolving a conflict, look for the first available empty slot that fits the duration.\n- If the user references a meeting by name, list events to find the corresponding ID before acting.\n- Communicate clearly, be polite, and keep responses action-focused.\n- The user may append the current date in their request; rely on it for temporal context."""
+
+# Prompt
+AGENT_SYSTEM_PROMPT = """You are an expert Executive Assistant and Calendar Conflict Resolver.
+
+Responsibilities:
+1. Manage the user's Google Calendar.
+2. Detect conflicts (overlapping events).
+3. Propose and execute solutions (rescheduling).
+
+Guidelines:
+- ALWAYS call `get_current_time_and_events` before proposing time slots or editing events.
+- When resolving a conflict, look for the first available empty slot that fits the duration.
+- If the user references a meeting by name, list events to find the corresponding ID before acting.
+- Communicate clearly, be polite, and keep responses action-focused.
+- The user may append the current date in their request; rely on it for temporal context."""
 
 app = Flask(__name__)
+
+# =============================================================================
+# MONGODB CONNECTION
+# =============================================================================
+
+# Ideally, ensure MONGO_URI is set in your environment
+MONGO_URI = os.environ.get('MONGO_URI')
+
+if not MONGO_URI:
+    print("WARNING: MONGO_URI not set. Database operations will fail.")
+    client = None
+    tokens_collection = None
+else:
+    try:
+        client = MongoClient(MONGO_URI)
+        # Connect to database 'calendar_agent' and collection 'tokens'
+        db = client.get_database('calendar_agent')
+        tokens_collection = db.tokens
+        print("Connected to MongoDB successfully.")
+    except Exception as e:
+        print(f"Failed to connect to MongoDB: {e}")
+        client = None
+        tokens_collection = None
+
+# For this example, we use a fixed user ID since we aren't handling multi-user login sessions yet.
+DEFAULT_USER_ID = "main_user"
+
+# =============================================================================
+# HELPER FUNCTIONS: DATABASE
+# =============================================================================
+
+def save_token_to_db(creds):
+    """Saves the credentials object to MongoDB."""
+    if tokens_collection is None:
+        print("Error: Database not connected.")
+        return False
+    
+    # Convert credentials to a standard Python dictionary
+    creds_dict = json.loads(creds.to_json())
+    
+    # Update existing user or insert new one (Upsert)
+    tokens_collection.update_one(
+        {"user_id": DEFAULT_USER_ID},
+        {"$set": {"token_data": creds_dict, "updated_at": datetime.datetime.utcnow()}},
+        upsert=True
+    )
+    print("Token saved to MongoDB.")
+    return True
+
+def load_token_from_db():
+    """Loads credentials from MongoDB."""
+    if tokens_collection is None:
+        return None
+        
+    user_doc = tokens_collection.find_one({"user_id": DEFAULT_USER_ID})
+    
+    if user_doc and "token_data" in user_doc:
+        # Create Credentials object from the dictionary stored in DB
+        return Credentials.from_authorized_user_info(user_doc["token_data"], SCOPES)
+    
+    return None
 
 # =============================================================================
 # GOOGLE CALENDAR SERVICE
 # =============================================================================
 
 class GoogleCalendarService:
-    def __init__(self, credentials_dict: dict = None, token_dict: dict = None):
-        self.creds = None
-        if token_dict:
-            self.creds = Credentials.from_authorized_user_info(token_dict, SCOPES)
-        elif credentials_dict:
-            # For service initialization without token
-            pass
-        else:
-            raise ValueError("Either credentials or token must be provided")
-        
-        if self.creds and self.creds.valid:
-            self.service = build('calendar', 'v3', credentials=self.creds)
-        else:
-            self.service = None
+    def __init__(self, credentials=None):
+        self.creds = credentials
+        self.service = None
 
-    def refresh_credentials(self, credentials_dict: dict):
-        """Refresh expired credentials"""
-        if self.creds and self.creds.expired and self.creds.refresh_token:
-            self.creds.refresh(Request())
+        # Automatic Refresh Logic
+        if self.creds:
+            if not self.creds.valid:
+                if self.creds.expired and self.creds.refresh_token:
+                    try:
+                        print("Token expired. Refreshing...")
+                        self.creds.refresh(Request())
+                        # SAVE THE REFRESHED TOKEN BACK TO MONGODB
+                        save_token_to_db(self.creds) 
+                    except Exception as e:
+                        print(f"Error refreshing token: {e}")
+                        self.creds = None
+        
+        if self.creds:
             self.service = build('calendar', 'v3', credentials=self.creds)
-            return self.creds.to_json()
-        return None
 
     def list_events(self, days: int = 7) -> str:
         """List events for the next X days."""
@@ -63,22 +138,25 @@ class GoogleCalendarService:
         now = datetime.datetime.utcnow().isoformat() + 'Z'
         end_date = (datetime.datetime.utcnow() + datetime.timedelta(days=days)).isoformat() + 'Z'
         
-        events_result = self.service.events().list(
-            calendarId='primary', timeMin=now, timeMax=end_date,
-            singleEvents=True, orderBy='startTime').execute()
-        events = events_result.get('items', [])
+        try:
+            events_result = self.service.events().list(
+                calendarId='primary', timeMin=now, timeMax=end_date,
+                singleEvents=True, orderBy='startTime').execute()
+            events = events_result.get('items', [])
 
-        if not events:
-            return "No upcoming events found."
-        
-        result_str = f"--- Calendar Events for the next {days} days ---\n"
-        for event in events:
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            event_id = event['id']
-            summary = event.get('summary', 'No Title')
-            result_str += f"- [ID: {event_id}] {start}: {summary}\n"
-        
-        return result_str
+            if not events:
+                return "No upcoming events found."
+            
+            result_str = f"--- Calendar Events for the next {days} days ---\n"
+            for event in events:
+                start = event['start'].get('dateTime', event['start'].get('date'))
+                event_id = event['id']
+                summary = event.get('summary', 'No Title')
+                result_str += f"- [ID: {event_id}] {start}: {summary}\n"
+            
+            return result_str
+        except Exception as e:
+            return f"API Error: {str(e)}"
 
     def create_event(self, summary: str, start_iso: str, end_iso: str, description: str = ""):
         """Create a new event."""
@@ -91,8 +169,11 @@ class GoogleCalendarService:
             'start': {'dateTime': start_iso, 'timeZone': 'UTC'},
             'end': {'dateTime': end_iso, 'timeZone': 'UTC'},
         }
-        event = self.service.events().insert(calendarId='primary', body=event).execute()
-        return f"Event created: {event.get('htmlLink')}"
+        try:
+            event = self.service.events().insert(calendarId='primary', body=event).execute()
+            return f"Event created: {event.get('htmlLink')}"
+        except Exception as e:
+            return f"Failed to create event: {str(e)}"
 
     def update_event_time(self, event_id: str, new_start_iso: str, new_end_iso: str):
         """Reschedule an existing event."""
@@ -111,17 +192,7 @@ class GoogleCalendarService:
         except Exception as e:
             return f"Failed to update event: {str(e)}"
 
-    def delete_event(self, event_id: str):
-        if not self.service:
-            return "Calendar service not initialized"
-        
-        try:
-            self.service.events().delete(calendarId='primary', eventId=event_id).execute()
-            return f"Event {event_id} deleted successfully."
-        except Exception as e:
-            return f"Error deleting event: {str(e)}"
-
-# Global variable to hold service (will be initialized per request)
+# Global variable holder (service is instantiated per request context)
 calendar_service = None
 
 # =============================================================================
@@ -135,8 +206,8 @@ def get_current_time_and_events() -> str:
     ALWAYS call this first to understand the schedule context before making changes.
     """
     global calendar_service
-    if not calendar_service:
-        return "Calendar service not initialized"
+    if not calendar_service or not calendar_service.service:
+        return "Authentication required. Please visit /api/auth"
     
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     events = calendar_service.list_events(days=5)
@@ -162,9 +233,8 @@ def schedule_event(summary: str, start_time: str, duration_minutes: int, descrip
 @tool
 def resolve_conflict_reschedule(event_id: str, new_start_time: str) -> str:
     """
-    Reschedule an existing event (identified by ID) to a new start time to resolve a conflict.
-    The duration of the event will be preserved.
-    new_start_time must be in ISO format.
+    Reschedule an existing event (identified by ID) to a new start time.
+    Preserves duration. new_start_time must be in ISO format.
     """
     global calendar_service
     if not calendar_service:
@@ -208,22 +278,6 @@ def build_agent():
     agent = create_tool_calling_agent(llm, tools, prompt)
     return AgentExecutor(agent=agent, tools=tools, verbose=False)
 
-def _message_content_to_text(message: AIMessage) -> str:
-    """Normalize LangChain message content into printable text."""
-    if isinstance(message.content, str):
-        return message.content
-
-    if isinstance(message.content, list):
-        text_chunks = []
-        for block in message.content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text_chunks.append(block.get("text", ""))
-            else:
-                text_chunks.append(str(block))
-        return "\n".join(chunk for chunk in text_chunks if chunk)
-
-    return str(message.content)
-
 # =============================================================================
 # API ENDPOINTS
 # =============================================================================
@@ -231,11 +285,11 @@ def _message_content_to_text(message: AIMessage) -> str:
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        "message": "Google Calendar Conflict Resolver API",
+        "message": "Google Calendar Conflict Resolver API (MongoDB Backed)",
         "endpoints": {
             "/api/auth": "GET - Get OAuth URL",
-            "/api/callback": "POST - Handle OAuth callback",
-            "/api/chat": "POST - Chat with agent"
+            "/api/callback": "POST - Handle OAuth callback & Save to Mongo",
+            "/api/chat": "POST - Chat with agent (Uses Mongo Token)"
         }
     })
 
@@ -269,7 +323,7 @@ def auth():
 
 @app.route('/api/callback', methods=['POST'])
 def callback():
-    """Handle OAuth callback and exchange code for token"""
+    """Handle OAuth callback, exchange code for token, and SAVE TO MONGODB"""
     try:
         data = request.json
         code = data.get('code')
@@ -280,7 +334,7 @@ def callback():
         credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
         if not credentials_json:
             return jsonify({"error": "GOOGLE_CREDENTIALS not set"}), 500
-        
+            
         credentials_dict = json.loads(credentials_json)
         
         flow = Flow.from_client_config(
@@ -292,38 +346,52 @@ def callback():
         flow.fetch_token(code=code)
         credentials = flow.credentials
         
+        # --- SAVE TO MONGODB ---
+        success = save_token_to_db(credentials)
+        if not success:
+             return jsonify({"error": "Failed to save token to database"}), 500
+        # -----------------------
+        
         return jsonify({
-            "token": credentials.to_json(),
-            "message": "Authentication successful"
+            "message": "Authentication successful. Token saved to MongoDB."
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    """Process user message with the agent"""
+    """Process user message using Token from MONGODB"""
     global calendar_service
     
     try:
         data = request.json
         user_message = data.get('message')
-        token = data.get('token')
         conversation_history = data.get('history', [])
         
         if not user_message:
             return jsonify({"error": "Message required"}), 400
-        
-        if not token:
-            return jsonify({"error": "Authentication token required"}), 401
-        
+
         # Check for OpenAI API key
         if not os.environ.get('OPENAI_API_KEY'):
             return jsonify({"error": "OPENAI_API_KEY not set"}), 500
         
-        # Initialize calendar service with token
-        token_dict = json.loads(token) if isinstance(token, str) else token
-        calendar_service = GoogleCalendarService(token_dict=token_dict)
+        # --- LOAD TOKEN FROM MONGODB ---
+        creds = load_token_from_db()
         
+        if not creds:
+            return jsonify({
+                "error": "User not authenticated. Please go to /api/auth first.", 
+                "auth_required": True
+            }), 401
+            
+        # Initialize Service with loaded creds
+        # (This will trigger a refresh + DB update if the token is expired)
+        calendar_service = GoogleCalendarService(credentials=creds)
+        # -------------------------------
+        
+        if not calendar_service.service:
+             return jsonify({"error": "Failed to initialize Calendar service with stored token"}), 401
+
         # Build agent
         agent_graph = build_agent()
         
@@ -346,7 +414,6 @@ def chat():
             "agent_scratchpad": []
         })
         
-        # AgentExecutor returns output directly
         if isinstance(result_state, dict) and "output" in result_state:
             response_text = result_state["output"]
         else:
@@ -362,5 +429,7 @@ def chat():
 
 # For Vercel serverless deployment
 if __name__ != "__main__":
-    # Vercel will use the Flask app directly
     app = app
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
