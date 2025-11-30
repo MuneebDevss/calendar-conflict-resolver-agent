@@ -12,9 +12,10 @@ from googleapiclient.discovery import build
 
 # LangChain Imports
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_agent
+from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # =============================================================================
 # CONFIGURATION
@@ -198,11 +199,14 @@ def build_agent():
     tools = [get_current_time_and_events, schedule_event, resolve_conflict_reschedule]
     llm = ChatOpenAI(model=MODEL_NAME, temperature=0)
     
-    return create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=AGENT_SYSTEM_PROMPT,
-    )
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", AGENT_SYSTEM_PROMPT),
+        MessagesPlaceholder(variable_name="messages"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+    
+    agent = create_tool_calling_agent(llm, tools, prompt)
+    return AgentExecutor(agent=agent, tools=tools, verbose=False)
 
 def _message_content_to_text(message: AIMessage) -> str:
     """Normalize LangChain message content into printable text."""
@@ -337,23 +341,16 @@ def chat():
         ))
         
         # Invoke agent
-        result_state = agent_graph.invoke({"messages": messages})
+        result_state = agent_graph.invoke({
+            "messages": messages,
+            "agent_scratchpad": []
+        })
         
-        if not isinstance(result_state, dict):
-            return jsonify({"error": "Unexpected agent response"}), 500
-        
-        updated_messages = result_state.get("messages", messages)
-        
-        # Find the last AI message
-        ai_message = next(
-            (msg for msg in reversed(updated_messages) if isinstance(msg, AIMessage)),
-            None
-        )
-        
-        if ai_message is None:
-            return jsonify({"error": "No agent response"}), 500
-        
-        response_text = _message_content_to_text(ai_message)
+        # AgentExecutor returns output directly
+        if isinstance(result_state, dict) and "output" in result_state:
+            response_text = result_state["output"]
+        else:
+            return jsonify({"error": "Unexpected agent response format"}), 500
         
         return jsonify({
             "response": response_text,
