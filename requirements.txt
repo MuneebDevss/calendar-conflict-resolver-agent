@@ -8,7 +8,7 @@ langchain==0.3.7
 langchain-openai==0.2.9
 langchain-core==0.3.17
 
-openai==1.51.0   # <-- Critical fix
+openai==1.54.4  # ← THIS FIXES THE ISSUE
 
 pymongo==4.6.1
 tiktoken==0.7.0
