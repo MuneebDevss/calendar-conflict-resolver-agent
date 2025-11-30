@@ -10,6 +10,7 @@ pymongo==4.6.1
 
 # Direct Gemini client only (no LangChain)
 google-generativeai==0.7.2
+openai==1.46.0
 
 httplib2==0.22.0
 python-dotenv==1.0.1

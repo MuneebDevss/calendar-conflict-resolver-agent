@@ -10,8 +10,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
-# Gemini Direct Client (no LangChain)
-import google.generativeai as genai
+# OpenAI Direct Client (no LangChain)
+from openai import OpenAI
 
 # MongoDB Imports
 from pymongo import MongoClient
@@ -23,7 +23,7 @@ from pymongo import MongoClient
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 # Fixed: Use the correct model name without "models/" prefix
 # Options: "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"
-MODEL_NAME = "gemini-1.5-flash-latest"
+MODEL_NAME = "gpt-4o"
 
 # Prompt
 AGENT_SYSTEM_PROMPT = """You are an expert Executive Assistant and Calendar Conflict Resolver.
@@ -248,31 +248,28 @@ def resolve_conflict_reschedule(event_id: str, new_start_time: str) -> str:
         return f"Error rescheduling: {str(e)}"
 
 # =============================================================================
-# GEMINI CLIENT (NO LANGCHAIN)
+# OPENAI CLIENT (NO LANGCHAIN)
 # =============================================================================
 
-def get_gemini_model():
-    api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
+def get_openai_client() -> OpenAI | None:
+    api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
         return None
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(MODEL_NAME)
+    return OpenAI(api_key=api_key)
 
 def run_assistant(messages: list) -> str:
-    model = get_gemini_model()
-    if not model:
-        return "GOOGLE_API_KEY or GEMINI_API_KEY not set"
-    # Concatenate conversation into a single prompt with system instructions
-    parts = [AGENT_SYSTEM_PROMPT]
+    client = get_openai_client()
+    if not client:
+        return "OPENAI_API_KEY not set"
+    chat_messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
     for m in messages:
         role = m.get('role')
         content = m.get('content')
         if role and content:
-            parts.append(f"[{role}] {content}")
-    prompt_text = "\n\n".join(parts)
+            chat_messages.append({"role": role, "content": content})
     try:
-        resp = model.generate_content(prompt_text)
-        return getattr(resp, 'text', None) or str(resp)
+        resp = client.chat.completions.create(model=MODEL_NAME, messages=chat_messages, temperature=0)
+        return resp.choices[0].message.content if resp.choices else "(no response)"
     except Exception as e:
         return f"Model error: {e}"
 
@@ -367,10 +364,9 @@ def chat():
         if not user_message:
             return jsonify({"error": "Message required"}), 400
 
-        # Check for Gemini API key
-        google_api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
-        if not google_api_key:
-            return jsonify({"error": "GOOGLE_API_KEY or GEMINI_API_KEY not set"}), 500
+        # Check for OpenAI API key
+        if not os.environ.get('OPENAI_API_KEY'):
+            return jsonify({"error": "OPENAI_API_KEY not set"}), 500
         
         # Load token from MongoDB
         creds = load_token_from_db()
@@ -386,7 +382,7 @@ def chat():
         if not calendar_service.service:
              return jsonify({"error": "Failed to initialize Calendar service with stored token"}), 401
 
-        # Prepare messages for Gemini
+        # Prepare messages for OpenAI
         messages = list(conversation_history or [])
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
         messages.append({"role": "user", "content": f"{user_message}\n\n(Current date: {current_date})"})
