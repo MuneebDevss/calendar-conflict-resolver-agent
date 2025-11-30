@@ -8,13 +8,14 @@ google-api-python-client==2.116.0
 
 pymongo==4.6.1
 
-# LangChain core libs (remove explicit langchain-core pin to avoid conflicts)
-langchain>=0.2.13,<0.3.0
-langchain-community>=0.2.12,<0.3.0
-# Gemini integration (replaces OpenAI)
-langchain-google-genai
-# Optional direct client (sometimes useful for embeddings / future features)
-google-generativeai
+# LangChain core
+langchain==0.2.16
+langchain-core==0.2.38
+langchain-community==0.2.16
+
+# Gemini integration - FIXED VERSION
+langchain-google-genai==1.0.10
+google-generativeai==0.8.3
 
 httplib2==0.22.0
 python-dotenv==1.0.1

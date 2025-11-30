@@ -25,9 +25,9 @@ from pymongo import MongoClient
 # =============================================================================
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-# Use a GA-supported Gemini model identifier
-# Common options: "gemini-1.5-flash-latest" or "gemini-1.5-pro-latest"
-MODEL_NAME = "gemini-1.5-flash-latest"
+# Fixed: Use the correct model name without "models/" prefix
+# Options: "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"
+MODEL_NAME = "gemini-1.5-flash"
 
 # Prompt
 AGENT_SYSTEM_PROMPT = """You are an expert Executive Assistant and Calendar Conflict Resolver.
@@ -50,7 +50,6 @@ app = Flask(__name__)
 # MONGODB CONNECTION
 # =============================================================================
 
-# Ideally, ensure MONGO_URI is set in your environment
 MONGO_URI = os.environ.get('MONGO_URI')
 
 if not MONGO_URI:
@@ -59,9 +58,7 @@ if not MONGO_URI:
     tokens_collection = None
 else:
     try:
-        # Create MongoClient with proper connection settings
         client = MongoClient(MONGO_URI)
-        # Connect to database 'calendar_agent' and collection 'tokens'
         db = client.get_database('calendar_agent')
         tokens_collection = db.tokens
         print("Connected to MongoDB successfully.")
@@ -70,7 +67,6 @@ else:
         client = None
         tokens_collection = None
 
-# For this example, we use a fixed user ID since we aren't handling multi-user login sessions yet.
 DEFAULT_USER_ID = "main_user"
 
 # =============================================================================
@@ -83,10 +79,8 @@ def save_token_to_db(creds):
         print("Error: Database not connected.")
         return False
     
-    # Convert credentials to a standard Python dictionary
     creds_dict = json.loads(creds.to_json())
     
-    # Update existing user or insert new one (Upsert)
     tokens_collection.update_one(
         {"user_id": DEFAULT_USER_ID},
         {"$set": {"token_data": creds_dict, "updated_at": datetime.datetime.utcnow()}},
@@ -103,7 +97,6 @@ def load_token_from_db():
     user_doc = tokens_collection.find_one({"user_id": DEFAULT_USER_ID})
     
     if user_doc and "token_data" in user_doc:
-        # Create Credentials object from the dictionary stored in DB
         return Credentials.from_authorized_user_info(user_doc["token_data"], SCOPES)
     
     return None
@@ -117,14 +110,12 @@ class GoogleCalendarService:
         self.creds = credentials
         self.service = None
 
-        # Automatic Refresh Logic
         if self.creds:
             if not self.creds.valid:
                 if self.creds.expired and self.creds.refresh_token:
                     try:
                         print("Token expired. Refreshing...")
                         self.creds.refresh(Request())
-                        # SAVE THE REFRESHED TOKEN BACK TO MONGODB
                         save_token_to_db(self.creds) 
                     except Exception as e:
                         print(f"Error refreshing token: {e}")
@@ -195,7 +186,6 @@ class GoogleCalendarService:
         except Exception as e:
             return f"Failed to update event: {str(e)}"
 
-# Global variable holder (service is instantiated per request context)
 calendar_service = None
 
 # =============================================================================
@@ -270,7 +260,16 @@ def resolve_conflict_reschedule(event_id: str, new_start_time: str) -> str:
 
 def build_agent():
     tools = [get_current_time_and_events, schedule_event, resolve_conflict_reschedule]
-    llm = ChatGoogleGenerativeAI(model=MODEL_NAME, temperature=0)
+    
+    # Fixed: Proper initialization with explicit API key and correct model name
+    google_api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
+    
+    llm = ChatGoogleGenerativeAI(
+        model=MODEL_NAME,
+        google_api_key=google_api_key,
+        temperature=0,
+        convert_system_message_to_human=True  # Important for Gemini compatibility
+    )
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", AGENT_SYSTEM_PROMPT),
@@ -349,11 +348,9 @@ def callback():
         flow.fetch_token(code=code)
         credentials = flow.credentials
         
-        # --- SAVE TO MONGODB ---
         success = save_token_to_db(credentials)
         if not success:
              return jsonify({"error": "Failed to save token to database"}), 500
-        # -----------------------
         
         return jsonify({
             "message": "Authentication successful. Token saved to MongoDB."
@@ -374,12 +371,12 @@ def chat():
         if not user_message:
             return jsonify({"error": "Message required"}), 400
 
-        # Check for Gemini API key (support both GOOGLE_API_KEY and GEMINI_API_KEY)
+        # Check for Gemini API key
         google_api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
         if not google_api_key:
-            return jsonify({"error": "GOOGLE_API_KEY (or GEMINI_API_KEY) not set"}), 500
+            return jsonify({"error": "GOOGLE_API_KEY or GEMINI_API_KEY not set"}), 500
         
-        # --- LOAD TOKEN FROM MONGODB ---
+        # Load token from MongoDB
         creds = load_token_from_db()
         
         if not creds:
@@ -388,10 +385,7 @@ def chat():
                 "auth_required": True
             }), 401
             
-        # Initialize Service with loaded creds
-        # (This will trigger a refresh + DB update if the token is expired)
         calendar_service = GoogleCalendarService(credentials=creds)
-        # -------------------------------
         
         if not calendar_service.service:
              return jsonify({"error": "Failed to initialize Calendar service with stored token"}), 401
@@ -432,6 +426,5 @@ def chat():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    # Render dynamically injects PORT, default to 5000 locally
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
