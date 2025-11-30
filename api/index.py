@@ -363,7 +363,7 @@ def chat():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Vercel serverless function handler
-def handler(request):
-    with app.request_context(request.environ):
-        return app.full_dispatch_request()
+# For Vercel serverless deployment
+if __name__ != "__main__":
+    # Vercel will use the Flask app directly
+    app = app
