@@ -57,6 +57,7 @@ if not MONGO_URI:
     tokens_collection = None
 else:
     try:
+        # Create MongoClient with proper connection settings
         client = MongoClient(MONGO_URI)
         # Connect to database 'calendar_agent' and collection 'tokens'
         db = client.get_database('calendar_agent')
