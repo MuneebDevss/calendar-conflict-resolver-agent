@@ -11,10 +11,5 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
-  ],
-  "env": {
-    "OPENAI_API_KEY": "@openai_api_key",
-    "GOOGLE_CREDENTIALS": "@google_credentials",
-    "REDIRECT_URI": "@redirect_uri"
-  }
+  ]
 }
