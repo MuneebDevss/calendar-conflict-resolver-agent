@@ -10,12 +10,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
-# LangChain Imports (Gemini)
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain.tools import tool
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+# Gemini Direct Client (no LangChain)
+import google.generativeai as genai
 
 # MongoDB Imports
 from pymongo import MongoClient
@@ -27,7 +23,7 @@ from pymongo import MongoClient
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 # Fixed: Use the correct model name without "models/" prefix
 # Options: "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "gemini-1.5-flash-latest"
 
 # Prompt
 AGENT_SYSTEM_PROMPT = """You are an expert Executive Assistant and Calendar Conflict Resolver.
@@ -192,7 +188,6 @@ calendar_service = None
 # LANGCHAIN TOOLS
 # =============================================================================
 
-@tool
 def get_current_time_and_events() -> str:
     """
     Get the current system time (UTC) and list the user's upcoming calendar events.
@@ -206,7 +201,6 @@ def get_current_time_and_events() -> str:
     events = calendar_service.list_events(days=5)
     return f"Current Time (UTC): {now}\n\n{events}"
 
-@tool
 def schedule_event(summary: str, start_time: str, duration_minutes: int, description: str = "") -> str:
     """
     Schedule a new event.
@@ -223,7 +217,6 @@ def schedule_event(summary: str, start_time: str, duration_minutes: int, descrip
     except ValueError:
         return "Error: start_time must be in ISO format (e.g., 2024-11-29T15:00:00)"
 
-@tool
 def resolve_conflict_reschedule(event_id: str, new_start_time: str) -> str:
     """
     Reschedule an existing event (identified by ID) to a new start time.
@@ -255,30 +248,33 @@ def resolve_conflict_reschedule(event_id: str, new_start_time: str) -> str:
         return f"Error rescheduling: {str(e)}"
 
 # =============================================================================
-# AGENT SETUP
+# GEMINI CLIENT (NO LANGCHAIN)
 # =============================================================================
 
-def build_agent():
-    tools = [get_current_time_and_events, schedule_event, resolve_conflict_reschedule]
-    
-    # Fixed: Proper initialization with explicit API key and correct model name
-    google_api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
-    
-    llm = ChatGoogleGenerativeAI(
-        model=MODEL_NAME,
-        google_api_key=google_api_key,
-        temperature=0,
-        convert_system_message_to_human=True  # Important for Gemini compatibility
-    )
+def get_gemini_model():
+    api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        return None
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(MODEL_NAME)
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", AGENT_SYSTEM_PROMPT),
-        MessagesPlaceholder(variable_name="messages"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    return AgentExecutor(agent=agent, tools=tools, verbose=False)
+def run_assistant(messages: list) -> str:
+    model = get_gemini_model()
+    if not model:
+        return "GOOGLE_API_KEY or GEMINI_API_KEY not set"
+    # Concatenate conversation into a single prompt with system instructions
+    parts = [AGENT_SYSTEM_PROMPT]
+    for m in messages:
+        role = m.get('role')
+        content = m.get('content')
+        if role and content:
+            parts.append(f"[{role}] {content}")
+    prompt_text = "\n\n".join(parts)
+    try:
+        resp = model.generate_content(prompt_text)
+        return getattr(resp, 'text', None) or str(resp)
+    except Exception as e:
+        return f"Model error: {e}"
 
 # =============================================================================
 # API ENDPOINTS
@@ -390,33 +386,13 @@ def chat():
         if not calendar_service.service:
              return jsonify({"error": "Failed to initialize Calendar service with stored token"}), 401
 
-        # Build agent
-        agent_graph = build_agent()
-        
-        # Prepare messages
-        messages = []
-        for msg in conversation_history:
-            if msg.get('role') == 'user':
-                messages.append(HumanMessage(content=msg['content']))
-            elif msg.get('role') == 'assistant':
-                messages.append(AIMessage(content=msg['content']))
-        
+        # Prepare messages for Gemini
+        messages = list(conversation_history or [])
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
-        messages.append(HumanMessage(
-            content=f"{user_message}\n\n(Current date: {current_date})"
-        ))
-        
-        # Invoke agent
-        result_state = agent_graph.invoke({
-            "messages": messages,
-            "agent_scratchpad": []
-        })
-        
-        if isinstance(result_state, dict) and "output" in result_state:
-            response_text = result_state["output"]
-        else:
-            return jsonify({"error": "Unexpected agent response format"}), 500
-        
+        messages.append({"role": "user", "content": f"{user_message}\n\n(Current date: {current_date})"})
+
+        response_text = run_assistant(messages)
+
         return jsonify({
             "response": response_text,
             "success": True
