@@ -25,7 +25,9 @@ from pymongo import MongoClient
 # =============================================================================
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-MODEL_NAME = "gemini-1.5-flash"
+# Use a GA-supported Gemini model identifier
+# Common options: "gemini-1.5-flash-latest" or "gemini-1.5-pro-latest"
+MODEL_NAME = "gemini-1.5-flash-latest"
 
 # Prompt
 AGENT_SYSTEM_PROMPT = """You are an expert Executive Assistant and Calendar Conflict Resolver.
@@ -372,9 +374,10 @@ def chat():
         if not user_message:
             return jsonify({"error": "Message required"}), 400
 
-        # Check for Gemini API key
-        if not os.environ.get('GOOGLE_API_KEY'):
-            return jsonify({"error": "GOOGLE_API_KEY not set"}), 500
+        # Check for Gemini API key (support both GOOGLE_API_KEY and GEMINI_API_KEY)
+        google_api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
+        if not google_api_key:
+            return jsonify({"error": "GOOGLE_API_KEY (or GEMINI_API_KEY) not set"}), 500
         
         # --- LOAD TOKEN FROM MONGODB ---
         creds = load_token_from_db()
